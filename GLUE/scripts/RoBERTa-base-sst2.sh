@@ -3,11 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-HEAD_LR=0.00829
-FFT_LR=0.661
-SCALE=10.0
-TFF_L=4
-COEFF_BLOCK_SIZE=768
+export HF_DATASETS_TRUST_REMOTE_CODE=1
 
 python NLU_GLUE.py \
   --model_name_or_path roberta-base \
@@ -21,8 +17,8 @@ python NLU_GLUE.py \
   --share_entry \
   --exp_name sst2-base \
   --output_dir /nas/frameFT/glue/sst2 \
-  --head_lr "$HEAD_LR" \
-  --fft_lr "$FFT_LR" \
-  --scale "$SCALE" \
-  --tff_l "$TFF_L" \
-  --coeff_block_size "$COEFF_BLOCK_SIZE"
+  --head_lr 0.00829 \
+  --fft_lr 0.661 \
+  --scale 10.0 \
+  --tff_l 4 \
+  --tff_block_size 768

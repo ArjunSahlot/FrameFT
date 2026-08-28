@@ -3,11 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-HEAD_LR=0.01028
-FFT_LR=0.078
-SCALE=50.0
-TFF_L=2
-COEFF_BLOCK_SIZE=768
+export HF_DATASETS_TRUST_REMOTE_CODE=1
 
 python NLU_GLUE.py \
   --model_name_or_path roberta-base \
@@ -21,8 +17,8 @@ python NLU_GLUE.py \
   --share_entry \
   --exp_name mrpc-base \
   --output_dir /nas/frameFT/glue/mrpc \
-  --head_lr "$HEAD_LR" \
-  --fft_lr "$FFT_LR" \
-  --scale "$SCALE" \
-  --tff_l "$TFF_L" \
-  --coeff_block_size "$COEFF_BLOCK_SIZE"
+  --head_lr 0.01028 \
+  --fft_lr 0.078 \
+  --scale 50.0 \
+  --tff_l 2 \
+  --tff_block_size 768

@@ -101,7 +101,7 @@ class FrameModel(BaseTuner):
         - **peft_config** ([`LoraConfig`]): The configuration of the Lora model.
     """
 
-    prefix: str = "spectrum"
+    prefix: str = "ff_coeffs"
 
     def __init__(self, model, config, adapter_name) -> None:
         super().__init__(model, config, adapter_name)
@@ -159,7 +159,10 @@ class FrameModel(BaseTuner):
             "layer_num": layer_num,
             "init_std": frame_config.init_std,
             "tff_l": frame_config.tff_l,
-            "coeff_block_size": frame_config.coeff_block_size,
+            "tff_block_size": frame_config.tff_block_size,
+            "tff_l_out": frame_config.tff_l_out,
+            "tff_block_size_out": frame_config.tff_block_size_out,
+            "tff_num_blocks": frame_config.tff_num_blocks,
             "share_entry": frame_config.share_entry,
             "entry_seed": frame_config.entry_seed,
         }
@@ -179,10 +182,13 @@ class FrameModel(BaseTuner):
                 layer_num,
                 frame_config.init_std,
                 frame_config.tff_l,
-                frame_config.coeff_block_size,
+                frame_config.tff_block_size,
                 frame_config.share_entry,
                 frame_config.entry_seed,
                 frame_config.init_frame_weights,
+                tff_l_out=frame_config.tff_l_out,
+                tff_block_size_out=frame_config.tff_block_size_out,
+                tff_num_blocks=frame_config.tff_num_blocks,
             )
         else:
             new_module = self._create_new_module(frame_config, adapter_name, target, **kwargs)

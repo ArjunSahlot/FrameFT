@@ -57,8 +57,31 @@ class FrameConfig(PeftConfig):
     n_ff_coeffs: int = field(default=100, metadata={"help": "Number of trainable frame coefficients."})
     scale: float = field(default=0.1, metadata={"help": ""})
     init_std: float = field(default=1.0, metadata={"help": ""})
+    tff_k: int = field(default=384, metadata={"help": "Tight fusion frame `k` value (frame length)."})
     tff_l: int = field(default=2, metadata={"help": "Tight fusion frame `l` value."})
-    coeff_block_size: int = field(default=768, metadata={"help": "Block size for selecting frame coefficients."})
+    use_tff_l: bool = field(
+        default=True, metadata={"help": "Use `tff_l` instead of `tff_k` to define the frame."}
+    )
+    tff_l_out: Optional[int] = field(
+        default=None,
+        metadata={"help": "Tight fusion frame `l` value for the output dimension. Defaults to `tff_l`."},
+    )
+    tff_block_size: int = field(default=768, metadata={"help": "Block size for selecting frame coefficients."})
+    tff_block_size_out: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Block size along the output dimension for selecting frame coefficients. "
+            "Defaults to `tff_block_size`."
+        },
+    )
+    tff_num_blocks: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Number of blocks along each dimension. If set, it overrides `tff_block_size` / "
+            "`tff_block_size_out`"
+        },
+    )
+    tff_redundancy: float = field(default=1.0, metadata={"help": "Redundancy factor in the frames."})
     share_entry: bool = field(
         default=False,
         metadata={"help": "Share the coefficient locations across layers (same random permutation seed)."},
@@ -154,6 +177,10 @@ class FrameConfig(PeftConfig):
             )
         },
     )
+    merge_weights: bool = field(
+        default=False, metadata={"help": "Merge weights of the original model and the Frame model"}
+    )
+    enable_frame: Optional[List[bool]] = field(default=None, metadata={"help": "Used with `frame.MergedLinear`."})
 
     def __post_init__(self):
         self.peft_type = PeftType.FRAME

@@ -108,7 +108,25 @@ def	construct_real_tff(k,l,n):
 	return tffs_real, block_indices
 
 # ==========================================================
+# master copies of the frames, kept on cpu and keyed by (n, l)
 tffs = {}
+# per-device copies, keyed by ((n, l), device)
+_tffs_on_device = {}
+
+
+def get_tff(key, device):
+    """Return the frame for `key` on `device`, caching one copy per device.
+
+    The frames are read-only, so a single copy per device is shared by every layer that
+    lives on it. This is what makes a model sharded over several GPUs work.
+    """
+    device = torch.device(device)
+    cache_key = (key, device)
+    tff = _tffs_on_device.get(cache_key)
+    if tff is None:
+        tff = tffs[key].to(device)
+        _tffs_on_device[cache_key] = tff
+    return tff
 
 
 def FFT_SHIFT(matrix):
@@ -127,7 +145,7 @@ def FFT_SHIFT(matrix):
 
 class FrameLayer(BaseTunerLayer):
     # All names of layers that may contain (trainable) adapter weights
-    adapter_layer_names = ["spectrum"]
+    adapter_layer_names = ["ff_coeffs"]
     # All names of other parameters that may contain adapter-related parameters
     # other_param_names = ("rank", "dropout")
 
@@ -137,8 +155,10 @@ class FrameLayer(BaseTunerLayer):
         # self.lora_alpha = {}
         self.scale = {}
         # self.dropout = nn.ModuleDict({})
-        self.spectrum = nn.ParameterDict({})
+        self.ff_coeffs = nn.ParameterDict({})
         self.indices = {}
+        # per-adapter (n, l) keys into the module-level `tffs` cache for the in/out frames
+        self.tff_keys = {}
         # For Embedding layer
         # self.lora_embedding_A = nn.ParameterDict({})
         # self.lora_embedding_B = nn.ParameterDict({})
@@ -171,28 +191,57 @@ class FrameLayer(BaseTunerLayer):
         self.out_features = out_features
 
 
-    def update_layer(self, adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, coeff_block_size, share_entry, entry_seed, init_frame_weights=None):
+    def update_layer(self, adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights=None, tff_l_out=None, tff_block_size_out=None, tff_num_blocks=None):
         print(f'{layer_num} {adapter_name} {n_ff_coeffs} {scale} {share_entry = }')
         if n_ff_coeffs <= 0:
             raise ValueError(f"`n_ff_coeffs` should be a positive integer value but the value passed is {n_ff_coeffs}")
         self.n_ff_coeffs[adapter_name] = n_ff_coeffs
         self.scale[adapter_name] = scale
 
-        n = self.in_features
-        l = tff_l
-        k = n // l
-        # construct tff if not already
-        if n not in tffs:
-            tffs[n], _ = construct_real_tff(k, l//2, n//2)
-            tffs[n] = tffs[n].view(-1, n).to('cuda')
+        # out-dim frame parameters default to the in-dim ones (square behavior)
+        if tff_l_out is None:
+            tff_l_out = tff_l
+        if tff_block_size_out is None:
+            tff_block_size_out = tff_block_size
 
-        cb = coeff_block_size
+        n_in, l_in = self.in_features, tff_l
+        n_out, l_out = self.out_features, tff_l_out
+        if n_in % l_in != 0:
+            raise ValueError(f"`tff_l` ({l_in}) must divide in_features ({n_in})")
+        if n_out % l_out != 0:
+            raise ValueError(f"`tff_l_out` ({l_out}) must divide out_features ({n_out})")
 
-        num_coeffs_per_subspace = cb * cb
-        num_blks = n // cb
+        # construct the in/out tffs if not already cached
+        for n, l in ((n_in, l_in), (n_out, l_out)):
+            if (n, l) not in tffs:
+                k = n // l
+                tff, _ = construct_real_tff(k, l//2, n//2)
+                tffs[(n, l)] = tff.view(-1, n)
+        self.tff_keys[adapter_name] = ((n_in, l_in), (n_out, l_out))
+
+        if tff_num_blocks is not None:
+            if n_in % tff_num_blocks != 0 or n_out % tff_num_blocks != 0:
+                raise ValueError(
+                    f"`tff_num_blocks` ({tff_num_blocks}) must divide both in_features ({n_in}) "
+                    f"and out_features ({n_out})"
+                )
+            cb_in = n_in // tff_num_blocks
+            cb_out = n_out // tff_num_blocks
+        else:
+            cb_in = tff_block_size
+            cb_out = tff_block_size_out
+
+        num_coeffs_per_subspace = cb_in * cb_out
+        num_blks = n_in // cb_in
+        if num_blks != n_out // cb_out:
+            raise ValueError(
+                f"in/out block counts must match: in_features ({n_in}) / tff_block_size ({cb_in}) = {num_blks} but "
+                f"out_features ({n_out}) / tff_block_size_out ({cb_out}) = {n_out // cb_out}"
+            )
         total_num_frame_coefficients = num_blks * num_coeffs_per_subspace
 
         if share_entry:
+            print('\033[32m Using shared entry... \033[0m')
             indices = torch.randperm(total_num_frame_coefficients,generator=torch.Generator().manual_seed(entry_seed))[:n_ff_coeffs]
         else:
             indices = torch.randperm(total_num_frame_coefficients,generator=torch.Generator().manual_seed(entry_seed + 1000*layer_num))[:n_ff_coeffs]
@@ -200,15 +249,12 @@ class FrameLayer(BaseTunerLayer):
         subspaces = indices // num_coeffs_per_subspace
         indices_within_subspace = indices % num_coeffs_per_subspace
 
-        row_indices, col_indices = indices_within_subspace // cb, indices_within_subspace % cb
-        final_row_indices, final_col_indices = row_indices + subspaces * cb, col_indices + subspaces * cb
-        new_out_feature = k * l
-        self.indices[adapter_name] = final_row_indices * new_out_feature + final_col_indices
+        row_indices, col_indices = indices_within_subspace // cb_out, indices_within_subspace % cb_out
+        final_row_indices, final_col_indices = row_indices + subspaces * cb_in, col_indices + subspaces * cb_out
+        self.indices[adapter_name] = final_row_indices * n_out + final_col_indices
 
-        print('\033[32m Using shared entry... \033[0m')
-            
-        self.indices[adapter_name] = torch.stack([self.indices[adapter_name] // self.in_features, self.indices[adapter_name] % self.in_features], dim=0)
-        self.spectrum[adapter_name] = nn.Parameter(torch.randn(n_ff_coeffs) * init_std, requires_grad=True)
+        self.indices[adapter_name] = torch.stack([self.indices[adapter_name] // n_out, self.indices[adapter_name] % n_out], dim=0)
+        self.ff_coeffs[adapter_name] = nn.Parameter(torch.randn(n_ff_coeffs) * init_std, requires_grad=True)
   
         weight = getattr(self.get_base_layer(), "weight", None)
         if weight is not None:
@@ -223,18 +269,18 @@ class FrameLayer(BaseTunerLayer):
         if init_frame_weights is False:
             return
 
-        if adapter_name in self.spectrum.keys():
+        if adapter_name in self.ff_coeffs.keys():
             if init_frame_weights is True:
                 # initialize A the same way as the default for nn.Linear and B to zero
                 # https://github.com/microsoft/LoRA/blob/a0a92e0f26c067cf94747bdbf1ce73793fa44d19/loralib/layers.py#L124
-                nn.init.kaiming_uniform_(self.spectrum[adapter_name].weight, a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.ff_coeffs[adapter_name].weight, a=math.sqrt(5))
             elif init_frame_weights.lower() == "gaussian":
-                nn.init.normal_(self.spectrum[adapter_name].weight, std=1 / self.r[adapter_name])
+                nn.init.normal_(self.ff_coeffs[adapter_name].weight, std=1 / self.r[adapter_name])
             else:
                 raise ValueError(f"Unknown initialization {init_frame_weights=}")
-        if adapter_name in self.spectrum.keys():
+        if adapter_name in self.ff_coeffs.keys():
             # initialize a the same way as the default for nn.linear and b to zero
-            nn.init.zeros_(self.spectrum[adapter_name])
+            nn.init.zeros_(self.ff_coeffs[adapter_name])
 
 
 class Linear(nn.Module, FrameLayer):
@@ -248,7 +294,10 @@ class Linear(nn.Module, FrameLayer):
         layer_num: int = 0,
         init_std: float = 1.0,
         tff_l: int = 2,
-        coeff_block_size: int = 768,
+        tff_block_size: int = 768,
+        tff_l_out: Optional[int] = None,
+        tff_block_size_out: Optional[int] = None,
+        tff_num_blocks: Optional[int] = None,
         share_entry: bool = False,
         entry_seed: int = 2024,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
@@ -261,7 +310,7 @@ class Linear(nn.Module, FrameLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, coeff_block_size, share_entry, entry_seed, init_frame_weights)
+        self.update_layer(adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights, tff_l_out=tff_l_out, tff_block_size_out=tff_block_size_out, tff_num_blocks=tff_num_blocks)
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
         """
@@ -286,7 +335,7 @@ class Linear(nn.Module, FrameLayer):
             adapter_names = self.active_adapters
 
         for active_adapter in adapter_names:
-            if active_adapter in self.spectrum.keys():
+            if active_adapter in self.ff_coeffs.keys():
                 base_layer = self.get_base_layer()
                 if safe_merge:
                     # Note that safe_merge will be slower than the normal merge
@@ -313,7 +362,7 @@ class Linear(nn.Module, FrameLayer):
             return
         while len(self.merged_adapters) > 0:
             active_adapter = self.merged_adapters.pop()
-            if active_adapter in self.spectrum.keys():
+            if active_adapter in self.ff_coeffs.keys():
                 self.get_base_layer().weight.data -= self.get_delta_weight(active_adapter)
 
     def get_delta_weight(self, adapter) -> torch.Tensor:
@@ -324,31 +373,24 @@ class Linear(nn.Module, FrameLayer):
             adapter (str):
                 The name of the adapter for which the delta weight should be computed.
         """
-        device = self.spectrum[adapter].device
-        dtype = self.spectrum[adapter].dtype
+        ff_coeffs = self.ff_coeffs[adapter]
+        device = ff_coeffs.device
+        dtype = ff_coeffs.dtype
+        indices = self.indices[adapter].to(device)
+        scale = self.scale[adapter]
+        key_in, key_out = self.tff_keys[adapter]
 
-        # In case users wants to merge the adapter weights that are in
-        # float16 while being on CPU, we need to cast the weights to float32, perform the merge and then cast back to
-        # float16 because the `@` and matmul operation in general is not supported in torch + cpu + fp16.
-        cast_to_fp32 = device.type == "cpu" and dtype == torch.float16
+        dense_s = torch.zeros((self.in_features, self.out_features), dtype=torch.float32, device=device)
+        dense_s[indices[0, :], indices[1, :]] = ff_coeffs.float()
 
-        spectrum = self.spectrum[adapter]
-        indices = self.indices[adapter].to(spectrum.device)
-        
+        tff_in = get_tff(key_in, device).to(dtype=torch.float32)
+        tff_out = get_tff(key_out, device).to(dtype=torch.float32)
 
-        weight = torch.fft.ifft2(torch.sparse.FloatTensor(indices, spectrum, [self.in_features, self.in_features]).to_dense()).real * 300
-        if cast_to_fp32:
-            weight = weight.float()
+        delta_w = tff_in.T @ dense_s @ tff_out * scale / math.sqrt(self.in_features * self.out_features)
+        # forward applies x @ delta_w, so the base-weight delta is its transpose
+        output_tensor = transpose(delta_w.T, self.fan_in_fan_out)
 
-        output_tensor = weight
-
-        if cast_to_fp32:
-            output_tensor = output_tensor.to(dtype=dtype)
-
-            # cast back the weights
-            self.weight[adapter] = weight.to(dtype)
-
-        return output_tensor
+        return output_tensor.to(dtype=dtype)
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         previous_dtype = x.dtype
@@ -362,23 +404,26 @@ class Linear(nn.Module, FrameLayer):
         else:
             result = self.base_layer(x, *args, **kwargs)
             for active_adapter in self.active_adapters:
-                if active_adapter not in self.spectrum.keys():
+                if active_adapter not in self.ff_coeffs.keys():
                     continue
                 
-                spectrum = self.spectrum[active_adapter]
-                indices = self.indices[active_adapter].to(spectrum.device)
+                ff_coeffs = self.ff_coeffs[active_adapter]
+                indices = self.indices[active_adapter].to(ff_coeffs.device)
                 scale = self.scale[active_adapter]
+                key_in, key_out = self.tff_keys[active_adapter]
 
-                dense_s = torch.zeros((self.in_features, self.in_features), dtype=spectrum.dtype, device='cuda')
-                dense_s[indices[0, :], indices[1, :]] = spectrum
-            
-                if spectrum.dtype == torch.bfloat16:
-                    dense_s = dense_s.to(torch.float16)
+                compute_dtype = x.dtype
+                if compute_dtype == torch.bfloat16:
+                    compute_dtype = torch.float16
 
-                tff = tffs[self.in_features]
-                delta_w = tff.T @ dense_s @ tff * scale / self.in_features
-                # delta_w = torch.fft.ifft2(dense_s).real * scale
-                x, delta_w = x.to(spectrum.dtype), delta_w.to(spectrum.dtype)
+                device = ff_coeffs.device
+                dense_s = torch.zeros((self.in_features, self.out_features), dtype=compute_dtype, device=device)
+                dense_s[indices[0, :], indices[1, :]] = ff_coeffs.to(compute_dtype)
+
+                tff_in = get_tff(key_in, device).to(compute_dtype)
+                tff_out = get_tff(key_out, device).to(compute_dtype)
+                delta_w = tff_in.T @ dense_s @ tff_out * scale / math.sqrt(self.in_features * self.out_features)
+                x, delta_w = x.to(compute_dtype), delta_w.to(compute_dtype)
                 result += torch.einsum('ijk,kl->ijl', x, delta_w)
 
         result = result.to(previous_dtype)

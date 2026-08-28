@@ -65,7 +65,7 @@ def get_peft_model_state_dict(
     if state_dict is None:
         state_dict = model.state_dict()
     if config.peft_type == PeftType.FRAME:
-        to_return = {k: state_dict[k] for k in state_dict if "frame_" in k}
+        to_return = {k: state_dict[k] for k in state_dict if "ff_coeffs" in k}
     else:
         raise NotImplementedError
     if getattr(model, "modules_to_save", None) is not None:
@@ -121,7 +121,7 @@ def set_peft_model_state_dict(model, peft_model_state_dict, adapter_name="defaul
 
     if config.peft_type is PeftType.FRAME:
         peft_model_state_dict = {}
-        parameter_prefix = "frame_"
+        parameter_prefix = "ff_coeffs"
         for k, v in state_dict.items():
             if parameter_prefix in k:
                 suffix = k.split(parameter_prefix)[1]

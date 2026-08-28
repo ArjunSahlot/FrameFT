@@ -58,7 +58,7 @@ wandb.init(
 )
 
 peft_type = PeftType.FRAME
-peft_config = FrameConfig(task_type="SEQ_CLS", inference_mode=False, n_ff_coeffs = args.n_ff_coeffs, scale = args.scale, init_std=args.init_std, tff_l=args.tff_l, coeff_block_size=args.coeff_block_size, share_entry=args.share_entry, entry_seed=args.entry_seed)
+peft_config = FrameConfig(task_type="SEQ_CLS", inference_mode=False, n_ff_coeffs = args.n_ff_coeffs, scale = args.scale, init_std=args.init_std, tff_l=args.tff_l, tff_block_size=args.tff_block_size, share_entry=args.share_entry, entry_seed=args.entry_seed)
 
 def log(*pargs):
     log_dir = './logs_glue/' + task + '/' + args.model_name_or_path.split("-")[1]

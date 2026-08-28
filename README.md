@@ -30,6 +30,9 @@ pip install -r requirements.txt
 
 # Install the FrameFT adapter (registers `frame` as a PEFT tuner)
 bash install_peft.sh
+
+# Install the lm-evaluation harness (for evaluating instruction tuned LLMs)
+bash install_lm_eval.sh
 ```
 
 
@@ -50,6 +53,20 @@ Use the corresponding script in
 `GLUE/scripts/` to launch any other model/task combination, e.g. `RoBERTa-large-mrpc.sh`,
 `RoBERTa-base-sst2.sh`, `RoBERTa-large-rte.sh`, etc. (models: `base`/`large`; tasks: `cola`, `mrpc`,
 `qnli`, `rte`, `sst2`, `stsb`). Update `--output_dir` in the script to your preferred results path.
+
+we use `wandb` for logging . Either run wandb login once inside the container, or disable logging with:
+
+
+export WANDB_MODE=disabled
+
+### Instruction Tuning experiments
+
+The LLM Instruction Tuning experiments live under `InstructionTuning/`. The scripts for launching these experiments for different models are in `InstructionTuning/launch_scripts/`. For example, to fine-tune **Llama 2 7B** model on the `Alpaca` dataset, run:
+
+```bash
+cd InstructionTuning
+bash launch_scripts/Llama-2-7b-frameft.sh
+```
 
 ## Experimental Results
 
