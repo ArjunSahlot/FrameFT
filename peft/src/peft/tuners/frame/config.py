@@ -87,6 +87,11 @@ class FrameConfig(PeftConfig):
         metadata={"help": "Share the coefficient locations across layers (same random permutation seed)."},
     )
     entry_seed: int = field(default=2024, metadata={"help": "Seed for the coefficient-location permutation."})
+    basis: str = field(
+        default="frame",
+        metadata={"help": "Orthogonal basis delta W is expressed in: 'frame' (tight fusion frame), 'random', or 'identity'."},
+    )
+    basis_seed: int = field(default=0, metadata={"help": "Seed for the 'random' basis."})
     fan_in_fan_out: bool = field(
         default=False,
         metadata={"help": "Set this to True if the layer to replace stores weight like (fan_in, fan_out)"},

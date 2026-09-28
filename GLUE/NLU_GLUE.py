@@ -17,6 +17,8 @@ from datasets import load_dataset, load_metric
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup, set_seed
 from tqdm import tqdm
 import csv
+import json
+import math
 
 import wandb
 
@@ -58,13 +60,13 @@ wandb.init(
 )
 
 peft_type = PeftType.FRAME
-peft_config = FrameConfig(task_type="SEQ_CLS", inference_mode=False, n_ff_coeffs = args.n_ff_coeffs, scale = args.scale, init_std=args.init_std, tff_l=args.tff_l, tff_block_size=args.tff_block_size, share_entry=args.share_entry, entry_seed=args.entry_seed)
+peft_config = FrameConfig(task_type="SEQ_CLS", inference_mode=False, n_ff_coeffs = args.n_ff_coeffs, scale = args.scale, init_std=args.init_std, tff_l=args.tff_l, tff_block_size=args.tff_block_size, share_entry=args.share_entry, entry_seed=args.entry_seed, basis=args.basis, basis_seed=args.basis_seed)
 
 def log(*pargs):
     log_dir = './logs_glue/' + task + '/' + args.model_name_or_path.split("-")[1]
     os.makedirs(log_dir, exist_ok=True)
     path_log = log_dir + '/bs' + str(args.bs) + 'maxlen' + str(args.max_length) + 'f_lr' + str(args.fft_lr)+ 'h_lr' + str(args.head_lr) + \
-          'num' + str(args.n_ff_coeffs) + 'scale' + str(args.scale) + 'seed' + str(args.seed) + 'init_std' + str(args.init_std) + '.txt'
+          'num' + str(args.n_ff_coeffs) + 'scale' + str(args.scale) + 'seed' + str(args.seed) + 'init_std' + str(args.init_std) + 'basis' + args.basis + '.txt'
     print(path_log)
     with open(path_log, mode = 'a+') as w:
         w.write(" ".join(["{}".format(t) for t in pargs]))
@@ -155,6 +157,31 @@ lr_scheduler = get_linear_schedule_with_warmup(
     num_training_steps=(len(train_dataloader) * args.num_epochs),
 )
 
+metric_name = {"stsb": "pearson", "cola": "matthews_correlation"}.get(task, "accuracy")
+run_record = {
+    "exp_name": args.exp_name, "task": task, "basis": args.basis, "basis_seed": args.basis_seed, "seed": args.seed,
+    "status": "running", "metric_name": metric_name, "epochs_total": args.num_epochs, "epochs_done": 0,
+    "best": None, "best_epoch": None, "final": None, "per_epoch": [], "args": vars(args),
+    "gpu": torch.cuda.get_device_name(0), "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+}
+start_time = time.time()
+
+
+def write_run_record():
+    """Atomically rewrite the per-run JSON so a crash never leaves a half-written file."""
+    if args.results_json is None:
+        return
+    run_record["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    run_record["elapsed_s"] = round(time.time() - start_time, 1)
+    os.makedirs(os.path.dirname(os.path.abspath(args.results_json)), exist_ok=True)
+    tmp_path = args.results_json + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(run_record, f, indent=2)
+    os.replace(tmp_path, args.results_json)
+
+
+write_run_record()
+
 acc_list = []
 model.to(device)
 for epoch in range(args.num_epochs):
@@ -211,6 +238,19 @@ for epoch in range(args.num_epochs):
         f"{task}-n{args.n_ff_coeffs}_max": max(acc_list),
     })
 
+    train_loss = float(loss)
+    run_record["per_epoch"].append({
+        "epoch": epoch, "metric": acc_list[-1], "eval": {k: float(v) for k, v in eval_metric.items()},
+        "train_loss": train_loss, "elapsed_s": round(time.time() - start_time, 1),
+    })
+    run_record.update(epochs_done=epoch + 1, best=max(acc_list), best_epoch=acc_list.index(max(acc_list)), final=acc_list[-1])
+    if not math.isfinite(train_loss):
+        # a diverged run can't recover; stop instead of burning the rest of the GPU time
+        run_record["status"] = "failed_nan"
+        write_run_record()
+        raise SystemExit(f"train loss is {train_loss} at epoch {epoch}; stopping")
+    write_run_record()
+
 
 
 results = [args.exp_name, max(acc_list)]
@@ -225,6 +265,10 @@ wandb.log({
     "task": task,
 })
 
+run_record["status"] = "done"
+write_run_record()
+
 # save model
-os.makedirs(args.output_dir, exist_ok=True)
-torch.save(model.state_dict(), os.path.join(args.output_dir, f"model_ckpt.pt"))
+if not args.no_save_ckpt:
+    os.makedirs(args.output_dir, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(args.output_dir, f"model_ckpt.pt"))

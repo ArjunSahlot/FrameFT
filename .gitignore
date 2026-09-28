@@ -1,4 +1,11 @@
-__pycache__
-GLUE/logs_glue
-GLUE/output
+__pycache__/
+wandb/
+GLUE/output/
+GLUE/logs_glue/
 GLUE/results.csv
+GLUE/*.log
+GLUE/results_smoke/
+GLUE/results/ckpt/
+GLUE/results/logs/
+GLUE/results
+GLUE/queue.txt

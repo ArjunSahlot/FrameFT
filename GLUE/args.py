@@ -30,6 +30,10 @@ parser.add_argument("--tff_block_size", type=int, default=768)
 parser.add_argument("--exp_name", type=str, default="frameft")
 parser.add_argument("--init_std", type=float, default=1.0)
 parser.add_argument("--output_dir", type=str, default='./output')
+parser.add_argument("--basis", type=str, default="frame", choices=["frame", "random", "identity"])
+parser.add_argument("--basis_seed", type=int, default=0)
+parser.add_argument("--results_json", type=str, default=None, help="Write per-epoch metrics to this JSON file after every epoch.")
+parser.add_argument("--no_save_ckpt", action="store_true", help="Skip saving the full model state dict at the end.")
 
 
 args = parser.parse_args()

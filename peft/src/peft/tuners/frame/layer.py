@@ -108,9 +108,32 @@ def	construct_real_tff(k,l,n):
 	return tffs_real, block_indices
 
 # ==========================================================
-# master copies of the frames, kept on cpu and keyed by (n, l)
+BASES = ("frame", "random", "identity")
+
+
+def build_basis(basis, n, l, basis_seed):
+    """Return an (n, n) orthogonal basis that delta W is expressed in.
+
+    "frame" is the tight fusion frame (the FrameFT default). "random" is a Haar-random orthogonal
+    matrix drawn from its own generator, so building it leaves the global RNG (head init, data order)
+    untouched. "identity" puts each coefficient directly on one weight entry.
+    """
+    if basis == "frame":
+        tff, _ = construct_real_tff(n // l, l // 2, n // 2)
+        return tff.view(-1, n)
+    if basis == "random":
+        g = torch.Generator().manual_seed(basis_seed)
+        q, r = torch.linalg.qr(torch.randn(n, n, generator=g, dtype=torch.float64))
+        # sign fix makes the distribution uniform over orthogonal matrices
+        return (q * torch.sign(torch.diagonal(r))).float()
+    if basis == "identity":
+        return torch.eye(n)
+    raise ValueError(f"Unknown basis {basis!r}, expected one of {BASES}")
+
+
+# master copies of the bases, kept on cpu and keyed by (basis, basis_seed, n, l)
 tffs = {}
-# per-device copies, keyed by ((n, l), device)
+# per-device copies, keyed by ((basis, basis_seed, n, l), device)
 _tffs_on_device = {}
 
 
@@ -191,7 +214,7 @@ class FrameLayer(BaseTunerLayer):
         self.out_features = out_features
 
 
-    def update_layer(self, adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights=None, tff_l_out=None, tff_block_size_out=None, tff_num_blocks=None):
+    def update_layer(self, adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights=None, tff_l_out=None, tff_block_size_out=None, tff_num_blocks=None, basis="frame", basis_seed=0):
         print(f'{layer_num} {adapter_name} {n_ff_coeffs} {scale} {share_entry = }')
         if n_ff_coeffs <= 0:
             raise ValueError(f"`n_ff_coeffs` should be a positive integer value but the value passed is {n_ff_coeffs}")
@@ -211,13 +234,12 @@ class FrameLayer(BaseTunerLayer):
         if n_out % l_out != 0:
             raise ValueError(f"`tff_l_out` ({l_out}) must divide out_features ({n_out})")
 
-        # construct the in/out tffs if not already cached
-        for n, l in ((n_in, l_in), (n_out, l_out)):
-            if (n, l) not in tffs:
-                k = n // l
-                tff, _ = construct_real_tff(k, l//2, n//2)
-                tffs[(n, l)] = tff.view(-1, n)
-        self.tff_keys[adapter_name] = ((n_in, l_in), (n_out, l_out))
+        # construct the in/out bases if not already cached
+        key_in, key_out = (basis, basis_seed, n_in, l_in), (basis, basis_seed, n_out, l_out)
+        for key in (key_in, key_out):
+            if key not in tffs:
+                tffs[key] = build_basis(basis, key[2], key[3], basis_seed)
+        self.tff_keys[adapter_name] = (key_in, key_out)
 
         if tff_num_blocks is not None:
             if n_in % tff_num_blocks != 0 or n_out % tff_num_blocks != 0:
@@ -300,6 +322,8 @@ class Linear(nn.Module, FrameLayer):
         tff_num_blocks: Optional[int] = None,
         share_entry: bool = False,
         entry_seed: int = 2024,
+        basis: str = "frame",
+        basis_seed: int = 0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         is_target_conv_1d_layer: bool = False,
         init_frame_weights: Union[bool, str] = True,
@@ -310,7 +334,7 @@ class Linear(nn.Module, FrameLayer):
         self.fan_in_fan_out = fan_in_fan_out
 
         self._active_adapter = adapter_name
-        self.update_layer(adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights, tff_l_out=tff_l_out, tff_block_size_out=tff_block_size_out, tff_num_blocks=tff_num_blocks)
+        self.update_layer(adapter_name, n_ff_coeffs, scale, layer_num, init_std, tff_l, tff_block_size, share_entry, entry_seed, init_frame_weights, tff_l_out=tff_l_out, tff_block_size_out=tff_block_size_out, tff_num_blocks=tff_num_blocks, basis=basis, basis_seed=basis_seed)
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[List[str]] = None) -> None:
         """
