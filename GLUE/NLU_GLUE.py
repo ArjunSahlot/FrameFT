@@ -162,9 +162,14 @@ for epoch in range(args.num_epochs):
     model.train()
     for step, batch in enumerate(tqdm(train_dataloader)):
         batch.to(device)
-        outputs = model(**batch)
-        loss = outputs.loss
-        loss.backward()
+        loss = 0
+        for i in range(0, len(batch["labels"]), args.micro_bs):
+            micro_batch = {k: v[i:i+args.micro_bs] for k, v in batch.items()}
+            micro_outputs = model(**micro_batch)
+            micro_loss = micro_outputs.loss * micro_batch["labels"].shape[0] / len(batch["labels"])
+            micro_loss.backward()
+            loss += micro_loss.detach()
+
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()

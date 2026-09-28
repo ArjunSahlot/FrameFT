@@ -23,7 +23,6 @@ seaborn==0.13.2
 sentencepiece==0.2.0
 setuptools==69.5.1
 sqlitedict==2.1.0
-sympy==1.13.1
 tokenizers==0.19.1
 tqdm==4.66.4
 tqdm-multiprocess==0.0.11
