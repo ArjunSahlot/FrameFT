@@ -1,0 +1,15 @@
+# Python packages for building the explainer video (see README.md for system packages).
+manim==0.21.0
+kokoro==0.9.4
+misaki==0.9.4
+soundfile==0.14.0
+numpy
+scipy
+pillow
+safetensors
+torch
+# the repo's peft package imports transformers and accelerate
+transformers==4.44.2
+accelerate==0.34.2
+# optional, for checking the voiceover against the script
+faster-whisper==1.2.1
